@@ -1,0 +1,67 @@
+# Same isolation as the compose "internal" network:
+#   anyone -> nginx -> frontend -> backend -> db / redis  (and migrate Job -> db)
+# Requires a CNI that enforces NetworkPolicy (Calico, Cilium, ...). Some local clusters
+# accept these objects but do not enforce them.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nginx-from-anywhere
+spec:
+  podSelector:
+    matchLabels: { app: nginx }
+  ingress:
+    - ports: [{ port: 80 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: frontend-from-nginx
+spec:
+  podSelector:
+    matchLabels: { app: frontend }
+  ingress:
+    - from: [{ podSelector: { matchLabels: { app: nginx } } }]
+      ports: [{ port: 3000 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend-from-frontend
+spec:
+  podSelector:
+    matchLabels: { app: backend }
+  ingress:
+    - from: [{ podSelector: { matchLabels: { app: frontend } } }]
+      ports: [{ port: 8080 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: db-from-backend
+spec:
+  podSelector:
+    matchLabels: { app: db }
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: backend } }
+        - podSelector: { matchLabels: { app: db-migrate } }
+      ports: [{ port: 5432 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-from-backend
+spec:
+  podSelector:
+    matchLabels: { app: redis }
+  ingress:
+    - from: [{ podSelector: { matchLabels: { app: backend } } }]
+      ports: [{ port: 6379 }]

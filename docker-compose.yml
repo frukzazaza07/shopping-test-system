@@ -1,0 +1,120 @@
+name: stock-cart
+
+# Scale test:  docker compose up -d --build --scale backend=3 --scale frontend=2
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    # Budget: replicas x "Maximum Pool Size" must stay below max_connections.
+    command: ["postgres", "-c", "max_connections=200"]
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [backend]
+    # No "ports": the database is reachable only from the internal network.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Read cache + stock gate. Postgres stays the source of truth: the API re-syncs the counters
+  # from the DB, so Redis needs no persistence (a restart = a short fallback to Postgres).
+  # volatile-lru only evicts TTL'd cache entries, never the stock counters.
+  redis:
+    image: redis:8-alpine
+    restart: unless-stopped
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\" --save '' --appendonly no --maxmemory 128mb --maxmemory-policy volatile-lru"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    networks: [backend]
+    # No "ports": internal only.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # One-off: EF Core migrations + seed, then exits (k8s equivalent: Job "db-migrate").
+  # API replicas never touch the schema, so scaling them can't race on migrations.
+  migrate:
+    build: ./backend
+    image: stock-cart-backend:local
+    command: ["--migrate"]
+    restart: "no"
+    environment:
+      ConnectionStrings__Default: Host=db;Port=5432;Database=${POSTGRES_DB};Username=${POSTGRES_USER};Password=${POSTGRES_PASSWORD};GSS Encryption Mode=Disable
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [backend]
+
+  backend:
+    build: ./backend
+    image: stock-cart-backend:local
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__Default: Host=db;Port=5432;Database=${POSTGRES_DB};Username=${POSTGRES_USER};Password=${POSTGRES_PASSWORD};GSS Encryption Mode=Disable;Maximum Pool Size=${DB_MAX_POOL_SIZE:-20}
+      Security__ApiKey: ${API_KEY:?API_KEY is required}
+      Cors__AllowedOrigins__0: ${FRONTEND_ORIGIN:?FRONTEND_ORIGIN is required}
+      Redis__ConnectionString: redis:6379,password=${REDIS_PASSWORD}
+      Redis__StockSyncSeconds: ${REDIS_STOCK_SYNC_SECONDS:-30}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+        required: false   # the API works without Redis (Postgres only)
+    networks: [backend]
+    expose: ["8080"]
+    # Readiness = DB reachable + no pending migrations (the image has no curl, so use bash /dev/tcp).
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080 && printf \"GET /health/ready HTTP/1.0\r\n\r\n\" >&3 && head -n1 <&3 | grep -q \" 200 \"'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_DEPLOYMENT_ID: ${DEPLOYMENT_ID:-local}
+      secrets: [next_actions_key]
+    image: stock-cart-frontend:local
+    restart: unless-stopped
+    environment:
+      API_INTERNAL_URL: http://backend:8080
+      API_KEY: ${API_KEY}
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks: [frontend, backend]
+    expose: ["3000"]
+
+  nginx:
+    build: ./nginx
+    image: stock-cart-nginx:local
+    restart: unless-stopped
+    ports:
+      - "${NGINX_PORT:-8088}:80"   # the ONLY port published to the host
+    depends_on: [frontend]
+    networks: [frontend]
+
+secrets:
+  next_actions_key:
+    environment: NEXT_SERVER_ACTIONS_ENCRYPTION_KEY
+
+networks:
+  frontend: {}          # nginx <-> Next.js
+  backend:
+    internal: true      # Next.js <-> API <-> Postgres/Redis, no host access, no internet
+
+volumes:
+  pgdata:

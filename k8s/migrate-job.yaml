@@ -1,0 +1,39 @@
+# Runs EF Core migrations + seed ONCE per deploy (same image as the API, `--migrate` mode).
+# API pods stay NotReady (/health/ready checks for pending migrations) until this has finished.
+# Jobs are immutable: scripts/k8s-up.sh deletes the previous one before applying.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-migrate
+spec:
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: db-migrate
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: migrate
+          image: stock-cart-backend
+          imagePullPolicy: IfNotPresent
+          args: ["--migrate"]
+          env:
+            - name: DB_HOST
+              valueFrom: { configMapKeyRef: { name: stock-cart-config, key: DB_HOST } }
+            - name: POSTGRES_DB
+              valueFrom: { secretKeyRef: { name: stock-cart-secrets, key: POSTGRES_DB } }
+            - name: POSTGRES_USER
+              valueFrom: { secretKeyRef: { name: stock-cart-secrets, key: POSTGRES_USER } }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: stock-cart-secrets, key: POSTGRES_PASSWORD } }
+            - name: ConnectionStrings__Default
+              value: Host=$(DB_HOST);Port=5432;Database=$(POSTGRES_DB);Username=$(POSTGRES_USER);Password=$(POSTGRES_PASSWORD);GSS Encryption Mode=Disable
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }

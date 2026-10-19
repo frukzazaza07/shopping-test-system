@@ -1,0 +1,65 @@
+# Read cache + stock gate. No PVC on purpose: Postgres is the source of truth and the API
+# re-syncs the counters from it, so losing Redis only means a short fallback to Postgres.
+# Production: a managed Redis (ElastiCache / Memorystore / Azure Cache) or Redis Sentinel/Cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:8-alpine
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom: { secretKeyRef: { name: stock-cart-secrets, key: REDIS_PASSWORD } }
+            - name: REDISCLI_AUTH
+              valueFrom: { secretKeyRef: { name: stock-cart-secrets, key: REDIS_PASSWORD } }
+          args:
+            - redis-server
+            - --requirepass
+            - $(REDIS_PASSWORD)
+            - --save
+            - ""
+            - --appendonly
+            - "no"
+            - --maxmemory
+            - 128mb
+            - --maxmemory-policy
+            - volatile-lru     # only TTL'd cache entries may be evicted, never stock counters
+          ports:
+            - containerPort: 6379
+          readinessProbe:
+            exec: { command: ["redis-cli", "ping"] }
+            periodSeconds: 5
+          livenessProbe:
+            exec: { command: ["redis-cli", "ping"] }
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 192Mi }
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999          # "redis" user of the official image
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }

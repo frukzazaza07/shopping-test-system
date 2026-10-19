@@ -1,0 +1,20 @@
+# Development overrides: Swagger at http://localhost:8088/swagger
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+# Back to production mode:
+#   docker compose up -d
+#
+# Only in this mode is nginx attached to the backend network. In production the API stays
+# reachable from Next.js only.
+
+services:
+  backend:
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+
+  nginx:
+    networks: [frontend, backend]
+    volumes:
+      - ./nginx/dev:/etc/nginx/extra:ro
+    depends_on:
+      - frontend
+      - backend

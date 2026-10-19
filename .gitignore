@@ -1,0 +1,7 @@
+.env
+.vs/
+.idea/
+**/bin/
+**/obj/
+*.user
+k8s/secrets.env

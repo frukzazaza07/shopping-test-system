@@ -1,0 +1,43 @@
+# Deploy:  ./scripts/k8s-up.sh      (builds images, creates secrets, applies this)
+# Render:  kubectl kustomize k8s
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: stock-cart
+
+resources:
+  - namespace.yaml
+  - postgres.yaml
+  - redis.yaml
+  - migrate-job.yaml
+  - backend.yaml
+  - frontend.yaml
+  - nginx.yaml
+  - autoscaling.yaml
+  - network-policy.yaml
+
+# Non-secret settings.
+configMapGenerator:
+  - name: stock-cart-config
+    literals:
+      - FRONTEND_ORIGIN=http://localhost:8088
+      - API_INTERNAL_URL=http://backend:8080
+      - DB_HOST=db
+      # 6 API pods (HPA max) x 20 = 120 connections < Postgres max_connections=200
+      - DB_MAX_POOL_SIZE=20
+      - REDIS_STOCK_SYNC_SECONDS=30
+
+# Secrets come from k8s/secrets.env (git-ignored, see secrets.env.example) - never committed.
+# The generated name gets a content hash, so changing a secret rolls the pods automatically.
+secretGenerator:
+  - name: stock-cart-secrets
+    envs:
+      - secrets.env
+
+# Local images built by scripts/k8s-up.sh. In CI: `kustomize edit set image` to a registry tag.
+images:
+  - name: stock-cart-backend
+    newTag: local
+  - name: stock-cart-frontend
+    newTag: local
+  - name: stock-cart-nginx
+    newTag: local
